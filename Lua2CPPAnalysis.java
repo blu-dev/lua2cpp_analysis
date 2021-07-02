@@ -1,13 +1,27 @@
-//TODO write a description for this script
-//@author 
-//@category _NEW_
+// Performs more analysis on lua2cpp modules for Super Smash Bros. Ultimate
+//@author blujay
+//@category 
 //@keybinding 
 //@menupath 
 //@toolbar 
 
+import ghidra.app.emulator.EmulatorHelper;
+import ghidra.app.plugin.processors.sleigh.SleighLanguage;
 import ghidra.app.script.GhidraScript;
+import ghidra.app.util.NamespaceUtils;
 import ghidra.app.util.cparser.C.CParser;
+import ghidra.pcode.emulate.BreakCallBack;
+import ghidra.pcode.emulate.BreakTable;
+import ghidra.pcode.emulate.BreakTableCallBack;
+import ghidra.pcode.emulate.Emulate;
+import ghidra.pcode.memstate.MemoryBank;
+import ghidra.pcode.memstate.MemoryPageBank;
+import ghidra.pcode.memstate.MemoryState;
 import ghidra.program.model.util.*;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.exception.DuplicateNameException;
+import ghidra.util.exception.InvalidInputException;
+import ghidra.util.task.TaskMonitor;
 import ghidra.program.model.reloc.*;
 import ghidra.program.model.data.*;
 import ghidra.program.model.block.*;
@@ -17,163 +31,244 @@ import ghidra.program.model.mem.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.pcode.*;
-import ghidra.program.database.ProgramDB;
 import ghidra.program.model.address.*;
+import java.util.zip.CRC32;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.nio.*;
 import java.util.ArrayList;
-import ghidra.program.database.symbol.NamespaceManager;
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 
-class Pair {
-	public String name;
-	public int value;
-	public Pair(String n, int v) {
-		name = n;
-		value = v;
-	}
-}
-
-class StringPair {
+class Strings {
 	public String first;
 	public String second;
-	public StringPair(String f, String s) {
-		first = f;
-		second = s;
+	
+	public Strings(String f, String s) {
+		first = f; second = s;
 	}
 }
-public class ModuleFiller extends GhidraScript {
-	
-	
-	
-	static final int BR_BITMASK = 0b1111_1111_1111_1111_1111_1100_0001_1111;
-	static final int BR_REQUIRED = 0b1101_0110_0001_1111_0000_0000_0000_0000;
-	static final int LDR_BITMASK = 0b1111_1111_1100_0000_0000_0000_0000_0000;
-	static final int LDR_REQUIRED = 0b1111_1001_0100_0000_0000_0000_0000_0000;
-	static final int LDR_OFFSET = 0b0000_0000_0011_1111_1111_1100_0000_0000;
-	
-	static final Pair[] PAIRS = new Pair[] {
-			new Pair("AbsorberModule", 0x110),
-			new Pair("AreaModule", 0xC0),
-	        new Pair("ArticleModule", 0x98),
-	        new Pair("AttackModule", 0xA0),
-	        new Pair("CameraModule", 0x60),
-	        new Pair("CancelModule", 0x128),
-	        new Pair("CaptureModule", 0x138),
-	        new Pair("CatchModule", 0x120),
-	        new Pair("ColorBlendModule", 0x70),
-	        new Pair("ComboModule", 0xB8),
-	        new Pair("ControlModule", 0x48),
-	        new Pair("DamageModule", 0xA8),
-	        new Pair("EffectModule", 0x140),
-	        new Pair("GrabModule", 0x158),
-	        new Pair("GroundModule", 0x58),
-	        new Pair("HitModule", 0xB0),
-	        new Pair("InkPaintModule", 0x198),
-	        new Pair("ItemModule", 0xC8),
-	        new Pair("JostleModule", 0x118),
-	        new Pair("KineticModule", 0x68),
-	        new Pair("LinkModule", 0xD0),
-	        new Pair("LuaModule", 0x190),
-	        new Pair("ModelModule", 0x78),
-	        new Pair("MotionAnimcmdModule", 0x188),
-	        new Pair("MotionModule", 0x88),
-	        new Pair("PhysicsModule", 0x80),
-	        new Pair("PostureModule", 0x38),
-	        new Pair("ReflectModule", 0xF8),
-	        new Pair("ReflectorModule", 0x108),
-	        new Pair("SearchModule", 0xE0),
-	        new Pair("ShadowModule", 0x180),
-	        new Pair("ShakeModule", 0x168),
-	        new Pair("ShieldModule", 0x100),
-	        new Pair("SlopeModule", 0x160),
-	        new Pair("SlowModule", 0x170),
-	        new Pair("SoundModule", 0x148),
-	        new Pair("StatusModule", 0x40),
-	        new Pair("StopModule", 0x90),
-	        new Pair("TeamModule", 0xD8),
-	        new Pair("TurnModule", 0xF0),
-	        new Pair("VisibilityModule", 0x150),
-	        new Pair("WorkModule", 0x50)
+
+class StructStrings {
+	public static final String Hash40MapEntry = 
+			"struct Hash40MapEntry {" +
+			"	void* next;" +
+			"	Hash40 key;" +
+			"	Hash40 also_key;" +
+			"	void* value;" +
+			"};";
+	public static final String Hash40Map =
+			"struct Hash40Map {" +
+			"	Hash40MapEntry** buckets;" +
+			"	ulonglong bucketCount;" +
+			"};";
+	public static final String L2CAgent =
+			"struct L2CAgent {" +
+			"	void** vtable;" +
+			"	lua_State* luaStateAgent;" +
+			"	Hash40Map functions;" +
+			"	undefined8 field_0x20;" +
+			"	undefined8 field_0x28;" +
+			"   undefined8 field_0x30;" +
+			"   BattleObject* battleObject;" +
+			"   BattleObjectModuleAccessor* moduleAccessor;" +
+			"};";
+	public static final String AgentBaseFiberStruct = 
+			"struct AgentBaseFiberStruct {" +
+			"   Fiber field_0x0;" +
+			"   undefined8 field_0x8;" +
+			"   undefined4 field_0x10;" +
+			"   undefined4 filed_0x14;" +
+			"};";
+	public static final String L2CAgentBase =
+			"struct L2CAgentBase {" +
+			"	void** vtable;" +
+			"	lua_State* luaStateAgent;" +
+			"	Hash40Map functions;" +
+			"	undefined8 field_0x20;" +
+			"	undefined8 field_0x28;" +
+			"   undefined8 field_0x30;" +
+			"   BattleObject* battleObject;" +
+			"   BattleObjectModuleAccessor* moduleAccessor;" +
+			"   undefined8 field_0x48;" +
+			"   undefined8 field_0x50;" +
+			"   undefined8 field_0x58;" +
+			"   AgentBaseFiberStruct field_0x60[4];" +
+			"   undefined2 field_0xc0;" +
+			"   undefined field_0xc2[6];" +
+			"};";
+	public static final String L2CFighterBase =
+			"struct L2CFighterBase {" +
+			"	void** vtable;" +
+			"	lua_State* luaStateAgent;" +
+			"	Hash40Map functions;" +
+			"	undefined8 field_0x20;" +
+			"	undefined8 field_0x28;" +
+			"   undefined8 field_0x30;" +
+			"   BattleObject* battleObject;" +
+			"   BattleObjectModuleAccessor* moduleAccessor;" +
+			"   undefined8 field_0x48;" +
+			"   undefined8 field_0x50;" +
+			"   undefined8 field_0x58;" +
+			"   AgentBaseFiberStruct field_0x60[4];" +
+			"   undefined2 field_0xc0;" +
+			"   undefined field_0xc2[6];" +
+			"   L2CValue globalTable;" +
+			"   L2CValue field_0xd8;" +
+			"   L2CValue field_0xe8;" +
+			"   L2CValue field_0xf8;" +
+			"   L2CValue field_0x108;" +
+			"};";
+	public static final String L2CWeaponCommon =
+			"struct L2CWeaponCommon {" +
+			"	void** vtable;" +
+			"	lua_State* luaStateAgent;" +
+			"	Hash40Map functions;" +
+			"	undefined8 field_0x20;" +
+			"	undefined8 field_0x28;" +
+			"   undefined8 field_0x30;" +
+			"   BattleObject* battleObject;" +
+			"   BattleObjectModuleAccessor* moduleAccessor;" +
+			"   undefined8 field_0x48;" +
+			"   undefined8 field_0x50;" +
+			"   undefined8 field_0x58;" +
+			"   AgentBaseFiberStruct field_0x60[4];" +
+			"   undefined2 field_0xc0;" +
+			"   undefined field_0xc2[6];" +
+			"   L2CValue globalTable;" +
+			"   L2CValue field_0xd8;" +
+			"   L2CValue field_0xe8;" +
+			"   L2CValue field_0xf8;" +
+			"   L2CValue field_0x108;" +
+			"};";
+	public static final String L2CFighterCommon =
+			"struct L2CFighterCommon {" +
+			"	void** vtable;" +
+			"	lua_State* luaStateAgent;" +
+			"	Hash40Map functions;" +
+			"	undefined8 field_0x20;" +
+			"	undefined8 field_0x28;" +
+			"   undefined8 field_0x30;" +
+			"   BattleObject* battleObject;" +
+			"   BattleObjectModuleAccessor* moduleAccessor;" +
+			"   undefined8 field_0x48;" +
+			"   undefined8 field_0x50;" +
+			"   undefined8 field_0x58;" +
+			"   AgentBaseFiberStruct field_0x60[4];" +
+			"   undefined2 field_0xc0;" +
+			"   undefined field_0xc2[6];" +
+			"   L2CValue globalTable;" +
+			"   L2CValue field_0xd8;" +
+			"   L2CValue field_0xe8;" +
+			"   L2CValue field_0xf8;" +
+			"   L2CValue field_0x108;" +
+			"   L2CValue field_0x118;" +
+			"   L2CValue field_0x128;" +
+			"   L2CValue field_0x138;" +
+			"   L2CValue field_0x148;" +
+			"   L2CValue field_0x158;" +
+			"   L2CValue field_0x168;" +
+			"   L2CValue field_0x178;" +
+			"   L2CValue field_0x188;" +
+			"   L2CValue field_0x198;" +
+			"   L2CValue field_0x1a8;" +
+			"   L2CValue field_0x1b8;" +
+			"   L2CValue field_0x1c8;" +
+			"   L2CValue field_0x1d8;" +
+			"   L2CValue field_0x1e8;" +
+			"   L2CValue field_0x1f8;" +
+			"   L2CValue field_0x208;" +
+			"   L2CValue field_0x218;" +
+			"};";
+	public static final String[] STRUCTS = new String[] {
+			Hash40MapEntry, Hash40Map, L2CAgent, AgentBaseFiberStruct,
+			L2CAgentBase, L2CFighterBase, L2CWeaponCommon, L2CFighterCommon
+	};
+	public static final String[] CATEGORIES = new String[] {
+			"/lib", "/lib", "/lib", "/lib", "/lua2cpp", "/lua2cpp", "/lua2cpp", "/lua2cpp"
+	};
+}
+
+class ConditionMap {
+	static final Strings[] PAIRS = new Strings[] {
+			new Strings("STATUS_PRE", "pre"),
+			new Strings("STATUS_MAIN", "main"),
+			new Strings("STATUS_END", "end"),
+			new Strings("INIT_STATUS", "init"),
+			new Strings("EXEC_STATUS", "exec"),
+			new Strings("EXEC_STOP", "exec_stop"),
+			new Strings("EXEC_STATUS_POST", "exec_post"),
+			new Strings("EXIT_STATUS", "exit"),
+			new Strings("MAP_CORRECTION", "map_correct"),
+			new Strings("FIX_CAMERA", "fix_cam"),
+			new Strings("FIX_POS_SLOW", "fix_pos_slow"),
+			new Strings("CHECK_DAMAGE", "check_dmg"),
+			new Strings("CHECK_ATTACK", "check_atk"),
+			new Strings("ON_CHANGE_LR", "on_change_lr"),
+			new Strings("NOTIFY_EVENT_GIMMICK", "notify_event_gimmick"),
+			new Strings("CALC_PARAM", "calc_param")
 	};
 	
-	static final StringPair[] MODULE_VTABLES = new StringPair[] {
-		    new StringPair("AbsorberModule", "7104e32ff8"),
-		    new StringPair("AreaModule", "7104e451d8"),
-		    new StringPair("ArticleModule", "7104e2a0a0"),
-		    new StringPair("AttackModule", "7104e2a428"),
-		    new StringPair("CameraModule", "7104e2ada8"),
-		    new StringPair("CancelModule", "7104e45488"),
-		    new StringPair("CaptureModule", "7104e2b2c0"),
-		    new StringPair("CatchModule", "7104e2b540"),
-		    new StringPair("ColorBlendModule", "7104e455b8"),
-		    new StringPair("ComboModule", "7104e45780"),
-		    new StringPair("ControlModule", "7104e45908"),
-		    new StringPair("DamageModule", "7104e460a8"),
-		    new StringPair("EffectModule", "7104e466d8"),
-		    new StringPair("GrabModule", "7104e2d570"),
-		    new StringPair("GroundModule", "7104e46bc0"),
-		    new StringPair("HitModule", "7104e47410"),
-		    new StringPair("InkPaintModule", "7104e47680"),
-		    new StringPair("ItemModule", "7104e47770"),
-		    new StringPair("JostleModule", "7104e47a40"),
-		    new StringPair("KineticModule", "7104e47bb8"),
-		    new StringPair("LinkModule", "7104e2f518"),
-		    new StringPair("LuaModule", "7104e481d8"),
-		    new StringPair("ModelModule", "7104e48350"),
-		    new StringPair("MotionAnimcmdModule", "7104e48ec8"),
-		    new StringPair("MotionModule", "7104e487e0"),
-		    new StringPair("PhysicsModule", "7104e315b0"),
-		    new StringPair("PostureModule", "7104e32020"),
-		    new StringPair("ReflectModule", "7104e32378"),
-		    new StringPair("ReflectorModule", "7104e32dc8"),
-		    new StringPair("SearchModule", "7104e324b0"),
-		    new StringPair("ShadowModule", "7104e326c0"),
-		    new StringPair("ShakeModule", "7104e48fc0"),
-		    new StringPair("ShieldModule", "7104e32898"),
-		    new StringPair("SlopeModule", "7104e33228"),
-		    new StringPair("SlowModule", "7104e33428"),
-		    new StringPair("SoundModule", "7104e490a0"),
-		    new StringPair("StatusModule", "7104e494b8"),
-		    new StringPair("StopModule", "7104e49710"),
-		    new StringPair("TeamModule", "7104e33f78"),
-		    new StringPair("TurnModule", "7104e340e8"),
-		    new StringPair("VisibilityModule", "7104e341f0"),
-		    new StringPair("WorkModule", "7104e49ab0")
-		};
-	
-	public String snakeCaseToPascalCase(String functionName) {
-		String[] words = functionName.split("__")[1].split("_impl")[0].split("_");
-		String result = "";
-		for (String word : words) {
-			result += word.substring(0, 1).toUpperCase() + word.substring(1);
+	public static String getNamespaceName(String conditionName) {
+		for (Strings ss : PAIRS) {
+			if (ss.first.equals(conditionName))
+				return ss.second;
 		}
-		return result;
+		return null;
+	}
+}
+
+class InstructionMasks {
+	public static final int RET_MASK = 0b1111_1111_1111_1111_1111_1100_0001_1111;
+	public static final int RET_REQUIRED = 0b1101_0110_0101_1111_0000_0000_0000_0000;
+	
+	public static final int MOVZ64_MASK = 0b1111_1111_1000_0000_0000_0000_0000_0000;
+	public static final int MOVZ64_REQUIRED = 0b1101_0010_1000_0000_0000_0000_0000_0000;
+	
+	public static final int MOVK64_MASK = 0b1111_1111_1000_0000_0000_0000_0000_0000;
+	public static final int MOVK64_REQUIRED = 0b1111_0010_1000_0000_0000_0000_0000_0000;
+	
+	public static final int CMP_MASK = 0b1111_1111_0010_0000_0000_0000_0001_1111;
+	public static final int CMP_REQUIRED = 0b1110_1011_0000_0000_0000_0000_0001_1111;
+	
+	public boolean isRet(int instr) {
+		return (instr & RET_MASK) == RET_REQUIRED;
 	}
 	
-	public int getInstruction(Address addr) throws MemoryAccessException {
-		byte[] bytes = getBytes(addr, 4);
-		int ret = (bytes[0] & 0xFF) | (bytes[1] & 0xFF) << 8 | (bytes[2] & 0xFF) << 16 | (bytes[3] & 0xFF) << 24;
-		return ret;
+	public boolean isMovZ64(int instr) {
+		return (instr & MOVZ64_MASK) == MOVZ64_REQUIRED;
 	}
 	
-	public int getLdrOffset(int instr) {
-		return (instr & LDR_OFFSET) >> 10;
+	public boolean isMovK64(int instr) {
+		return (instr & MOVK64_MASK) == MOVK64_REQUIRED;
 	}
 	
-	public long getVirtFuncOffset(Address addr) throws Exception {
-		int instr = getInstruction(addr), prevInstr = 0;
-		while ((instr & BR_BITMASK) != BR_REQUIRED) {
-			addr = addr.add(4);
-			if ((instr & LDR_BITMASK) == LDR_REQUIRED)
-				prevInstr = instr;
-			instr = getInstruction(addr);
-		}
-		if ((prevInstr & LDR_BITMASK) != LDR_REQUIRED) {
-			printf("%x", prevInstr);
-			throw new Exception();
-		}
-		return getLdrOffset(prevInstr) << 3;
+	public boolean isCmp(int instr) {
+		return (instr & CMP_MASK) == CMP_REQUIRED;
+	}
+}
+
+class HashEmulator {
+	Address currentAddress;
+	ArrayList<Long> hashes;
+	ArrayList<Address> vtables;
+	long[] registers;
+	
+	public HashEmulator(Address starting) {
+		currentAddress = starting;
+		hashes = new ArrayList<>();
+		registers = new long[31];
 	}
 	
-	public Address derefAddress(Address addr) throws Exception {
+	public ArrayList<Long> getHashes() {
+		
+		return null;
+	}
+}
+
+public class Lua2CPPAnalysis extends GhidraScript {
+	
+	private Address derefAddress(Address addr) throws Exception {
 		byte[] bytes = getBytes(addr, 8);
 		String formatString = String.format("%02x%02x%02x%02x%02x%02x%02x%02x", bytes[7], bytes[6], bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]);
 		if (!formatString.startsWith("00000071"))
@@ -181,174 +276,414 @@ public class ModuleFiller extends GhidraScript {
 		return getAddressFactory().getAddress(formatString);
 	}
 	
-	public GhidraClass getNewClass(String moduleName) throws Exception {
-		SymbolTable sm = getCurrentProgram().getSymbolTable();
-		if (sm.getClassSymbol(moduleName, null) != null)
-			throw new Exception("Cannot edit existing class namespace!");
-		return sm.createClass(null, moduleName, SourceType.USER_DEFINED);
+	private static long hash40(String str) {
+		CRC32 crc = new CRC32();
+		crc.update(str.getBytes());
+		long length = (long)str.length() << 32;
+		long value = crc.getValue();
+		return length | value;
 	}
 	
-	public StructureDataType getNewStruct(String moduleName, int size) throws Exception {
+	private void fixExistingTypes() throws Exception {
+		SymbolTable symTable = getCurrentProgram().getSymbolTable();
 		DataTypeManager dtm = getCurrentProgram().getDataTypeManager();
-		if (dtm.getCategory(new CategoryPath("/SmashModules")) == null)
-			dtm.createCategory(new CategoryPath("/SmashModules"));
-		if (dtm.getCategory(new CategoryPath("/SmashModules/" + moduleName)) == null)
-			dtm.createCategory(new CategoryPath("/SmashModules/" + moduleName));
-		if (dtm.getDataType("/SmashModules/" + moduleName) != null) {
-			throw new Exception("Cannot edit existing structure!");
+		Namespace l2cagent = symTable.getNamespace("L2CAgent", symTable.getNamespace("lib", null));
+		if (!(l2cagent instanceof GhidraClass)) {
+			StructureDataType agentType = new StructureDataType(new CategoryPath("/lib"), "L2CAgent", 0x48);
+			dtm.addDataType(agentType, DataTypeConflictHandler.REPLACE_HANDLER);
+			NamespaceUtils.convertNamespaceToClass(l2cagent);
 		}
-		StructureDataType ret = new StructureDataType(new CategoryPath("/SmashModules"), moduleName, size);
-		ret.replaceAtOffset(0, new Pointer64DataType(new Pointer64DataType(DataType.VOID)), -1, "vtbl", null);
-		ret.replaceAtOffset(8, new Pointer64DataType(dtm.getDataType("/Demangler/app/BattleObjectModuleAccessor")), -1, "owner", null);
-		dtm.addDataType(ret, DataTypeConflictHandler.DEFAULT_HANDLER);
-		return ret;
-	}
-	
-	public DataType generateVtableStruct(String moduleName, Address vtableStart, Namespace parent) throws Exception {
-		// go through and fix all of them
-		Address current = vtableStart;
-		for (Address deref = derefAddress(current); deref != null; current = current.add(8), deref = derefAddress(current)) {
-			Function f = getFunctionAt(deref);
-			if (f == null) {
-				println(deref.toString());
-				f = createFunction(deref, null);
-				if (parent != null)
-					f.setParentNamespace(parent);
-				f.setCallingConvention("__thiscall");
-			}
-		}
-		
-		DataTypeManager dtm = getCurrentProgram().getDataTypeManager();
-		
-		CategoryPath catPath = new CategoryPath("/SmashModules/" + moduleName);
-		StructureDataType ret = new StructureDataType(catPath, "vtable", 0);
-		current = vtableStart;
-		for (Address deref = derefAddress(current); deref != null; current = current.add(8), deref = derefAddress(current)) {
-			Function f = getFunctionAt(deref);
-			if (f == null) {
-				throw new Exception("Unexpected null function!");
-			}
-			FunctionDefinitionDataType funcDef = new FunctionDefinitionDataType(f, false);
-			funcDef.setCategoryPath(catPath);
-			if (funcDef.getName().startsWith("~~"))
-				funcDef.setName("~~" + moduleName);
-			else if (funcDef.getName().startsWith("~"))
-				funcDef.setName("~" + moduleName);
-			dtm.addDataType(funcDef, DataTypeConflictHandler.DEFAULT_HANDLER);
-			ret.add(new Pointer64DataType(funcDef), 8, funcDef.getName(), null);
-		}
-		dtm.addDataType(ret, DataTypeConflictHandler.DEFAULT_HANDLER);
-		return ret;
-	}
-
-    public void run() throws Exception {
-    	boolean updateInstead = askYesNo("Update", "Do you want to update the BattleObjectModuleAccessor?");
-    	if (updateInstead) {
-    		DataTypeManager dtm = getCurrentProgram().getDataTypeManager();
-//    		DataType moduleAccessor = dtm.getDataType("/Demangler/app/BattleObjectModuleAccessor");
-//    		if (moduleAccessor instanceof StructureDataType) {
-    			StructureDataType boma = new StructureDataType(
-    					new CategoryPath("/Demangler/app"),
-    					"BattleObjectModuleAccessor",
-    					0x2000
-    			);
-    					
-//    			StructureDataType boma = (StructureDataType)moduleAccessor;
-    			for (Pair p : PAIRS) {
-    				DataType module = dtm.getDataType("/SmashModules/" + p.name);
-    				if (module == null)
-    					throw new Exception(p.name);
-    				boma.replaceAtOffset(p.value, new Pointer64DataType(module), 8, p.name, null);
-    			}
-//    			dtm.replaceDataType(boma, boma, false);
-    			dtm.addDataType(boma, DataTypeConflictHandler.REPLACE_HANDLER);
-//    		}
-    		return;
+		StructureDataType fiber = new StructureDataType(new CategoryPath("/Demangler/phx"), "Fiber", 8);
+		dtm.addDataType(fiber,  DataTypeConflictHandler.REPLACE_HANDLER);
+		StructureDataType l2cvalue = new StructureDataType(new CategoryPath("/lib"), "L2CValue", 16);
+		dtm.addDataType(l2cvalue,  DataTypeConflictHandler.REPLACE_HANDLER);
+		TypedefDataType newHash40 = new TypedefDataType(new CategoryPath("/Demangler/phx"), "Hash40", new UnsignedLongDataType());
+		dtm.addDataType(newHash40,  DataTypeConflictHandler.REPLACE_HANDLER);
+    	CParser parser = new CParser(dtm);
+    	for (int i = 0; i < StructStrings.STRUCTS.length; i++) { 
+    		DataType dt = parser.parse(StructStrings.STRUCTS[i]);
+    		dt.setCategoryPath(new CategoryPath(StructStrings.CATEGORIES[i]));
+    		dtm.addDataType(dt, DataTypeConflictHandler.REPLACE_HANDLER);
     	}
-//    	for (StringPair sp : MODULE_VTABLES) {
-//    		Address vtableAddress = getAddressFactory().getAddress(sp.second);
-//    		String moduleName = sp.first;
-//    		int structSize = 0x1000;
-//    		boolean changeNonSymbolNamespace = false;
-//    		Program program = getCurrentProgram();
-//    		GhidraClass classNamespace = getNewClass(moduleName);
-//    		StructureDataType moduleStruct = getNewStruct(moduleName, structSize);
-//    		SymbolTable st = program.getSymbolTable();
-//    		SymbolIterator si = st.getDefinedSymbols();
-//    		Symbol vtableLabel = createLabel(vtableAddress, "vtbl", true, SourceType.USER_DEFINED);
-//    		vtableLabel.setNamespace(classNamespace);
-//    		Address destructor = derefAddress(vtableAddress);
-//    		Address deleter = derefAddress(vtableAddress.add(8));
-//    		Function d = getFunctionAt(destructor);
-//    		if (d == null) {
-//    			d = createFunction(destructor, null);
-//    		}
-//    		if (!(d.getParentNamespace() instanceof GhidraClass)) {    		
-//    			d.setName("~" + moduleName, SourceType.USER_DEFINED);
-//    			d.setCallingConvention("__thiscall");
-//    			d.setParentNamespace(classNamespace);
-//    		} else {
-//    			String prevComment = d.getComment();
-//    			if (prevComment == null)
-//    				prevComment = "";
-//    			d.setComment(prevComment + "\nAdditionally: " + moduleName + "::~" + moduleName);
-//    		}
-//    		d = getFunctionAt(deleter);
-//    		if (d == null) {
-//    			d = createFunction(deleter, null);
-//    		}
-//    		d.setName("~~" + moduleName, SourceType.USER_DEFINED);
-//    		d.setCallingConvention("__thiscall");
-//    		d.setParentNamespace(classNamespace);
-//    		ArrayList<Address> addresses = new ArrayList<Address>();
-//    		while (si.hasNext()) {
-//    			Symbol next = si.next();
-//    			String mangledName = next.getName();
-//    			Address symbolAddress = next.getAddress();
-//    			if (mangledName.startsWith("_ZN3app8lua_bind") && getSymbolAt(symbolAddress).getName().startsWith(moduleName))
-//    				addresses.add(symbolAddress);
-//    		}
-//    		// treat the symbol'd functions, the signatures might be fucked up /shrug
-//    		for (Address address : addresses) {
-//    			Function func = getFunctionAt(address);
-//    			String virtFuncName = snakeCaseToPascalCase(func.getName());
-//    			long vtableOffset = getVirtFuncOffset(address);
-//    			Address virtAddress = vtableAddress.add(vtableOffset);
-//    			Address virtFuncAddress = derefAddress(virtAddress);
-//    			Function virtFunc = getFunctionAt(virtFuncAddress);
-//    			if (virtFunc == null) {
-//    				println(virtFuncAddress.toString());
-//    				virtFunc = createFunction(virtFuncAddress, null);
-//    				if (virtFunc == null)
-//    					throw new Exception(String.format("%x", virtFuncAddress));
-//    			}
-//    			if (!(virtFunc.getParentNamespace() instanceof GhidraClass)) {    			
-//    				virtFunc.setName(virtFuncName, SourceType.USER_DEFINED);
-//    				virtFunc.setCallingConvention("__thiscall");
-//    				virtFunc.setParentNamespace(classNamespace);
-//    				Parameter[] params = func.getParameters();
-//    				for (Parameter p : params) {
-//    					if (!p.getFormalDataType().getDisplayName().equals("BattleObjectModuleAccessor *"))
-//    						virtFunc.addParameter(p, SourceType.USER_DEFINED); // yes, yes, I know this is deprecated
-//    				}
-//    			} else {
-//    				String prevComment = virtFunc.getComment();
-//    				if (prevComment == null)
-//    					prevComment = "";
-//    				virtFunc.setComment(prevComment + "\nAdditionally: " + moduleName + "::" + virtFuncName);
-//    			}
-//    		}
-//    		DataType vtable = generateVtableStruct(moduleName, vtableAddress, changeNonSymbolNamespace ? classNamespace : null);
-//    		moduleStruct.replace(0, new Pointer64DataType(vtable), -1, "vtbl", null);
-//    		program.getDataTypeManager().addDataType(moduleStruct, DataTypeConflictHandler.REPLACE_HANDLER);
-//    	}
+//		TypedefDataType weaponCommon = new TypedefDataType(new CategoryPath("/lua2cpp"), "L2CWeaponCommon", dtm.getDataType("/lua2cpp/L2CFighterBase"));
+//		dtm.addDataType(weaponCommon, DataTypeConflictHandler.REPLACE_HANDLER);
+	}
+	
+	private void makeThiscalls() throws Exception {
+		fixExistingTypes();
+		Program program = getCurrentProgram();
+		SymbolTable symTable = program.getSymbolTable();
+		Namespace libNamespace = symTable.getNamespace("lib", null);
+		Namespace lua2cppNamespace = symTable.getNamespace("lua2cpp", null);
+		SymbolIterator syms = symTable.getAllSymbols(false);
+		for (Symbol s : syms) {
+			String name = s.getName();
+			if (name.startsWith("_ZN3lib8L2C") || name.startsWith("_ZN7lua2cpp") ||
+					name.startsWith("_ZNK3lib8L2C") || name.startsWith("_ZNK7lua2cpp")) {
+				Function f = getFunctionAt(s.getAddress());
+				if (f == null)
+					continue;
+				f.setCallingConvention("__thiscall");
+				for (Parameter p : f.getParameters()) {
+					DataType dt = p.getDataType();
+					if (dt.getPathName().equals("/lib/L2CValue"))
+						p.setDataType(new Pointer64DataType(dt), SourceType.USER_DEFINED);
+				}
+			}
+		}
+	}
+	
+	private Function changeOrMakeFunction(String newName, Address where, Namespace parent) throws Exception {
+		Function f = getFunctionAt(where);
+		if (f == null) {
+			disassemble(where);
+			f = createFunction(where, null);
+		}
+		f.setName(newName, SourceType.USER_DEFINED);
+		f.setCallingConvention("__thiscall");
+		if (parent != null)
+			f.setParentNamespace(parent);
+		return f;
+	}
+	
+	private Address findStartOfSetters(Address start, boolean isFighter) {
+		// WARNING: THIS IS EXTREMELY HACKY
+		// THIS CODE IS SUS
+		
+		SymbolTable st = getCurrentProgram().getSymbolTable();
+		
+		for (Instruction instr = getInstructionAt(start); ; start = start.add(4), instr = getInstructionAt(start)) {
+			String txt = instr.toString();
+			if (txt.startsWith("bl")){
+				Address addr = parseAddress(txt.split(" ")[1]);
+				if (isFighter) {
+					if (getSymbolAt(addr).getName().startsWith("sub_")) {
+						return start.add(4);
+					}
+				} else {
+					if (getSymbolAt(addr).getName().startsWith("reserve_")) {
+						return start.add(4);
+					}
+				}
+			}
+		}
+	}
+	
+	private String formatStatusFuncName(String statusKind) {
+		String statusKindName = statusKind.split("STATUS_KIND_")[1];
+		String[] words = statusKindName.split("_");
+		String ret = "";
+		for (String word : words) {
+			if (!words.equals("")) {
+				ret += word.substring(0, 1).toUpperCase() + word.substring(1).toLowerCase();
+			}
+		}
+		return ret;
+	}
+	
+	private Namespace getOrCreateNamespace(Namespace parent, String namespace) throws Exception {
+		SymbolTable st = getCurrentProgram().getSymbolTable();
+		Namespace ret = st.getNamespace(namespace, parent);
+		if (ret == null)
+			ret = st.createNameSpace(parent, namespace, SourceType.USER_DEFINED);
+		return ret;
+	}
+	
+	private Namespace getNamespaceFromCondition(Namespace parent, String condition) throws Exception {
+		String conditionName = condition.split("STATUS_FUNC_")[1];
+		return getOrCreateNamespace(parent, ConditionMap.getNamespaceName(conditionName));
+	}
+	
+	private Address getAdrpAdd(Address start) throws Exception {
+		Instruction adrp = getInstructionAt(start);
+		Instruction add = getInstructionAt(start.add(4));
+		Address ret = parseAddress(adrp.toString().split("0x")[1]);
+		ret = ret.add(Long.parseLong(add.toString().split("0x")[1], 16));
+		return ret;
+	}
+	
+	private Function getFunctionFromBl(Instruction instr) throws Exception {
+		return getFunctionAt(parseAddress(instr.toString().split("0x")[1]));
+	}
+	
+	private boolean doesReturnOnStack(Function func) throws Exception {
+		Address end = func.getBody().getMaxAddress();
+		for (Address addr = func.getBody().getMinAddress(); addr.compareTo(end) < 0; addr = addr.add(4)) {
+			Instruction instr = getInstructionAt(addr);
+			for (Object o : instr.getResultObjects()) {
+				if (func.getName().equals("Appeal"))
+					println(o.toString());
+				if (o.toString().equals("x8"))
+					return false;
+			}
+			for (Object o : instr.getInputObjects()) {
+				if (o.toString().equals("x8"))
+					return true;
+			}
+		}
+		return false;
+	}
+	
+	private void fixInternalSymbolCalls(Function func) throws Exception {
+		DataType valueType = getCurrentProgram().getDataTypeManager().getDataType("/lib/L2CValue");
+		Address end = func.getBody().getMaxAddress();
+		for (Address addr = func.getBody().getMinAddress(); addr.compareTo(end) < 0; addr = addr.add(4)) {
+			Instruction instr = getInstructionAt(addr);
+			if (instr != null && instr.toString().startsWith("bl ")) {
+				Function sub = getFunctionFromBl(instr);
+				if (sub == null)
+					continue;
+				for (instr = instr.getPrevious(); instr.toString().startsWith("mov") || instr.toString().startsWith("add"); instr = instr.getPrevious()) {
+					for (Object o : instr.getResultObjects()) {
+						if (o.toString().equals("x8")) {
+							println(sub.getName());
+							ParameterImpl returnParam = new ParameterImpl("return_value", new Pointer64DataType(valueType), currentProgram.getRegister("x8"), currentProgram);
+							sub.setCustomVariableStorage(true);
+							sub.addParameter(returnParam, SourceType.USER_DEFINED);
+							sub.setReturnType(DataType.VOID, SourceType.USER_DEFINED);
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	private String snakeCaseToPascalCase(String str) {
+		String[] words = str.split("_");
+		String ret = "";
+		for (String word : words) {
+			ret += word.substring(0, 1).toUpperCase() + word.substring(1).toLowerCase();
+		}
+		return ret;
+	}
+	
+	private void makeStatuses(String agentName, Address vtableAddress, boolean isAgentFighter, boolean shouldNamespace) throws Exception {
+		Program program = getCurrentProgram();
+		String properAgentName = snakeCaseToPascalCase(agentName);
+		String fileName = getProgramFile().getName();
+		
+		// Making the typedef
+		String typeCatPath = "/" + fileName;
+		DataTypeManager dtm = program.getDataTypeManager();
+		if (dtm.getCategory(new CategoryPath(typeCatPath)) == null)
+			dtm.createCategory(new CategoryPath(typeCatPath));
+		TypedefDataType agentType = null;
+		if (isAgentFighter) 
+			agentType = new TypedefDataType(new CategoryPath(typeCatPath), "L2CFighter" + properAgentName, dtm.getDataType("/lua2cpp/L2CFighterCommon"));
+		else
+			agentType = new TypedefDataType(new CategoryPath(typeCatPath), "L2CWeapon" + properAgentName, dtm.getDataType("/lua2cpp/L2CWeaponCommon"));
+		dtm.addDataType(agentType, DataTypeConflictHandler.REPLACE_HANDLER);
+		
+		// Make the namespace class
+		SymbolTable symTable = program.getSymbolTable();
+		{
+			Symbol existing = symTable.getClassSymbol(agentType.getName(), null);
+			if (existing != null)
+				existing.delete();
+		}
+		GhidraClass agentClass = symTable.createClass(null, agentType.getName(), SourceType.USER_DEFINED);
+		
+		// Fill out the rest of the vtable
+		Address destructor = derefAddress(vtableAddress);
+		Address deleter = derefAddress(vtableAddress.add(8));
+		Address setter = derefAddress(vtableAddress.add(8 * 9));
+		
+		changeOrMakeFunction("~" + agentType.getName(), destructor, agentClass);
+		changeOrMakeFunction("~~" + agentType.getName(), deleter, agentClass);
+		changeOrMakeFunction("SetStatusScripts", setter, agentClass);
+		
+		// Autocreate status functions
+		Namespace agentStatuses = getOrCreateNamespace(agentClass, "status");
+		Address setterStart = findStartOfSetters(setter, isAgentFighter);
+		ArrayList<Integer> stores = new ArrayList<>();
+		ArrayList<Address> returnStack = new ArrayList<>();
+		@SuppressWarnings("deprecation")
+		Symbol constValueTable = symTable.getSymbol("const_value_table__", symTable.getNamespace("L2CAgentGeneratedBase", symTable.getNamespace("lua2cpp", null))); // continue tomrrow
+		for (Instruction instr = getInstructionAt(setterStart); ; setterStart = setterStart.add(4), instr = getInstructionAt(setterStart)) {
+			String instrString = instr.toString();
+			if (instrString.startsWith("ret")) {
+				if (returnStack.size() != 0) {
+					setterStart = returnStack.get(returnStack.size() - 1);
+					returnStack.remove(returnStack.size() - 1);
+					stores.clear();
+				} else {
+					break;
+				}
+			} else if (instrString.startsWith("ldr w1")) {
+				String inputs = instrString.split("ldr w1,")[1];
+				String[] inputList = inputs.split(",");
+				int offset = 0;
+				if (inputList.length != 2) {
+					Instruction movInstr = getInstructionAt(setterStart.subtract(4));
+					String movString = movInstr.toString();
+					for (Object o : movInstr.getInputObjects()) {
+						String s = o.toString();
+						if (s.startsWith("0x")) {
+							offset += Integer.parseInt(s.split("0x")[1], 16);
+							stores.add(offset);
+						}
+					}
+				} else {					
+					for (Object o : instr.getInputObjects()) {
+						String s = o.toString();
+						if (s.startsWith("0x")) {
+							offset += Integer.parseInt(s.split("0x")[1], 16);
+							stores.add(offset);
+						}
+					}
+				}
+			} else if (instrString.startsWith("bl")) {
+				Address gotoAddress = parseAddress(instrString.split(" ")[1]);
+				Symbol potential = getSymbolAt(gotoAddress);
+				if (potential != null && potential.getName().equals("sv_set_status_func")) {
+					Address adrpAddress = setterStart.subtract(20);
+					Address adrpLoaded = parseAddress(getInstructionAt(adrpAddress).toString().split("0x")[1]);
+					for (Object o : getInstructionAt(adrpAddress.add(4)).getInputObjects()) {
+						String s = o.toString();
+						if (s.startsWith("0x")) {
+							println(adrpAddress.toString());
+							adrpLoaded = adrpLoaded.add(Long.parseLong(s.split("0x")[1], 16));
+							break;
+						}
+					}
+					String statusKind = getSymbolAt(constValueTable.getAddress().add(stores.get(0))).getName();
+					while (!statusKind.contains("_STATUS_KIND_")) {
+						stores = new ArrayList<Integer>(stores.subList(1, stores.size()));
+						statusKind = getSymbolAt(constValueTable.getAddress().add(stores.get(0))).getName();
+					}
+					String condition = getSymbolAt(constValueTable.getAddress().add(stores.get(1))).getName();
+					Function f = null;
+					if (shouldNamespace) {
+						Namespace conditionNs = getNamespaceFromCondition(agentStatuses, condition);
+						f = changeOrMakeFunction(formatStatusFuncName(statusKind), adrpLoaded, conditionNs);
+					} else {
+						f = changeOrMakeFunction(formatStatusFuncName(statusKind) + "_" + ConditionMap.getNamespaceName(condition.split("STATUS_FUNC_")[1]), adrpLoaded, agentStatuses);
+					}
+					disassemble(f.getBody().getMinAddress());
+					stores.clear();
+				} else if (potential != null && potential.getName().startsWith("FUN")) {
+					stores.clear();
+					returnStack.add(setterStart);
+					setterStart = gotoAddress;
+				}
+			}
+		}
+		
+		// Autocreate main status loop functions
+//		Symbol subShiftStatusMain = symTable.getSymbol("sub_shift_status_main", symTable.getNamespace("L2CFighterCommon", symTable.getNamespace("lua2cpp", null)));
+		SymbolIterator children = shouldNamespace ? symTable.getChildren(symTable.getNamespaceSymbol("main", agentStatuses)) : symTable.getChildren(agentStatuses.getSymbol());
+		for (Symbol child : children) {
+			Function parent = getFunctionAt(child.getAddress());
+			if (parent == null)
+				continue;
+			if (!shouldNamespace && !parent.getName().endsWith("_main"))
+				continue;
+			for (Address addr = parent.getBody().getMinAddress(); addr.compareTo(parent.getBody().getMaxAddress()) < 0; addr = addr.add(4)) {
+				Instruction instr = getInstructionAt(addr);
+				if (instr != null && instr.toString().startsWith("bl")) {
+					Function blFunc = getFunctionFromBl(instr);
+					if (blFunc == null || !(blFunc.getName().equals("sub_shift_status_main") || blFunc.getName().equals("fastshift")))
+						continue;
+					Address fromAddress = addr;
+					for (; !getInstructionAt(fromAddress).toString().startsWith("adrp"); fromAddress = fromAddress.subtract(4));
+					fromAddress = getAdrpAdd(fromAddress);
+					disassemble(fromAddress);
+					if (shouldNamespace) {						
+						Namespace parentFunc = getOrCreateNamespace(symTable.getNamespace("main", agentStatuses), parent.getName());
+						changeOrMakeFunction("loop", fromAddress, parentFunc);
+					} else {
+						changeOrMakeFunction(parent.getName() + "_loop", fromAddress, agentStatuses);
+					}
+					break;
+				}
+			}
+		}
+		
+		// Fix the return types
+		DataType valueType = getCurrentProgram().getDataTypeManager().getDataType("/lib/L2CValue");
+		for (Symbol child : symTable.getChildren(symTable.getNamespaceSymbol("status", symTable.getNamespace(agentClass.getName(), null)))) {
+			if (!shouldNamespace) {
+				Function f = getFunctionAt(child.getAddress());
+				if (f != null) {
+					f.setReturnType(DataType.VOID, SourceType.USER_DEFINED);
+					ParameterImpl returnParam = new ParameterImpl("return_value", new Pointer64DataType(valueType), currentProgram.getRegister("x8"), currentProgram);
+					f.setCustomVariableStorage(true);
+					f.getParameter(0).setDataType(new Pointer64DataType(agentType), SourceType.USER_DEFINED);
+					f.addParameter(returnParam, SourceType.USER_DEFINED);
+					fixInternalSymbolCalls(f);
+				}
+				continue;
+			}
+			for (Symbol s : symTable.getChildren(child)) {
+				Function f = getFunctionAt(s.getAddress());
+				if (f != null) {
+					f.setReturnType(DataType.VOID, SourceType.USER_DEFINED);
+					ParameterImpl returnParam = new ParameterImpl("return_value", new Pointer64DataType(valueType), currentProgram.getRegister("x8"), currentProgram);
+					f.setCustomVariableStorage(true);
+					f.getParameter(0).setDataType(new Pointer64DataType(agentType), SourceType.USER_DEFINED);
+					f.addParameter(returnParam, SourceType.USER_DEFINED);
+					fixInternalSymbolCalls(f);
+				} else {
+					for (Symbol ss : symTable.getChildren(s)) {
+						Function ff = getFunctionAt(ss.getAddress());
+						if (ff != null) {
+							ff.setReturnType(DataType.VOID, SourceType.USER_DEFINED);
+							ParameterImpl returnParam = new ParameterImpl("return_value", new Pointer64DataType(valueType), currentProgram.getRegister("x8"), currentProgram);
+							ff.setCustomVariableStorage(true);
+							ff.getParameter(0).setDataType(new Pointer64DataType(agentType), SourceType.USER_DEFINED);
+							ff.addParameter(returnParam, SourceType.USER_DEFINED);
+							fixInternalSymbolCalls(ff);
+						}
+					}
+				}
+			}
+		}
+		
+		Symbol vtable = createLabel(vtableAddress, "vtable", true);
+		vtable.setNamespace(agentClass);
+	}
+	
+	public void checkLuaconsts() throws Exception {
+		SymbolTable symTable = getCurrentProgram().getSymbolTable();
+		Symbol constValueTable = symTable.getSymbol("const_value_table__", symTable.getNamespace("L2CAgentGeneratedBase", symTable.getNamespace("lua2cpp", null)));
+		Address cvtAddress = constValueTable.getAddress();
+		if (getSymbolAt(cvtAddress, "LUA_SCRIPT_LINE_MAX") == null) {
+			String filePath = askString("LuaDictionary Filepath", "Please enter the LuaDictionary filepath:");
+			BufferedReader reader = new BufferedReader(new FileReader(filePath));
+			for (String line = reader.readLine(); line != null; line = reader.readLine()) {
+				String[] parts = line.split(":", 2);
+				long offset = Long.decode("0x" + parts[0]);
+				createLabel(cvtAddress.add(offset), parts[1], true, SourceType.USER_DEFINED);
+			}
+		}
+	}
+	
+    public void run() throws Exception {
 //TODO Add User Code Here
-//    	Address vtableAddress = askAddress("Module VTable", "Enter the vtable address:");
-//    	String moduleName = askString("Module Name", "Enter the name of the module:");
-//    	int structSize = askInt("Struct Size", "Enter the size of the struct (approximate is fine):");
-//    	boolean changeNonSymbolNamespace = askYesNo("Non-symbol'd Entries", "Would you like to change the parent namespace of functions which do not have an associated 'app::lua_bind' function?\nIf unsure, select 'No'.");
-//    	println("Going to convert " + moduleName + " to a class with vtable at " + vtableAddress);
-//    	println(snakeCaseToPascalCase("ControlModule__check_button_off_impl"));
+    	checkLuaconsts();
+    	makeThiscalls();
+    	while (askYesNo("Autocreate Status Functions", "Are there more status agents to autocreate?")) {
+    		String name = askString("Agent Name", "Enter the agent name:");
+    		Address addr = askAddress("Agent VTable", "Enter the address for the vtable:");
+    		boolean isFighter = true;
+    		boolean shouldNamespace = false;
+    		try {
+    			String choice = askChoice("Agent type", "What is the type of agent?", Arrays.asList(new String[] {
+    					"Fighter", "Weapon"
+    			}), "Fighter");
+    			isFighter = choice.equals("Fighter");
+    			choice = askChoice("Generation type", "How would you like the status functions generated?", Arrays.asList(new String[] {
+        				"With namespaces (e.g. L2CFighterMario::status::main::AttackS4)",
+        				"Without namespaces (e.g. L2CFighterMario::status::AttackS4_main)"
+        			}), "With namespaces (e.g. L2CFighterMario::status::main::AttackS4)");
+        			shouldNamespace = choice.equals("With namespaces (e.g. L2CFighterMario::status::main::AttackS4)");
+    		}catch (CancelledException ce) {
+    			continue;
+    		}
+    		makeStatuses(name, addr, isFighter, shouldNamespace);
+    	}
+//    	makeThiscalls();
+//    	println(findStartOfSetters(parseAddress("71000080a0")).toString());
     }
 
 }
